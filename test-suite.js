@@ -1,0 +1,227 @@
+const { spawn } = require('child_process');
+const http = require('http');
+
+let serverProcess = null;
+
+// Function to test an endpoint
+function testEndpoint(path, method = 'GET', data = null) {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'localhost',
+      port: 3000,
+      path: path,
+      method: method,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    };
+
+    const req = http.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => {
+        try {
+          const jsonBody = JSON.parse(body);
+          resolve({ status: res.statusCode, data: jsonBody });
+        } catch (e) {
+          resolve({ status: res.statusCode, data: body });
+        }
+      });
+    });
+
+    req.on('error', reject);
+
+    if (data) {
+      req.write(JSON.stringify(data));
+    }
+    req.end();
+  });
+}
+
+// Function to wait for server to be ready
+function waitForServer(maxAttempts = 10) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    
+    const checkServer = () => {
+      attempts++;
+      console.log(`⏳ Checking if server is ready (attempt ${attempts}/${maxAttempts})...`);
+      
+      testEndpoint('/')
+        .then(() => {
+          console.log('✅ Server is ready!');
+          resolve();
+        })
+        .catch((error) => {
+          if (attempts >= maxAttempts) {
+            reject(new Error(`Server not ready after ${maxAttempts} attempts: ${error.message}`));
+          } else {
+            setTimeout(checkServer, 1000); // Wait 1 second before next attempt
+          }
+        });
+    };
+    
+    checkServer();
+  });
+}
+
+// Function to run all API tests
+async function runAPITests() {
+  console.log('\n🧪 Running comprehensive API tests...\n');
+
+  const tests = [
+    {
+      name: 'Root endpoint',
+      path: '/',
+      method: 'GET',
+      expectedStatus: 200
+    },
+    {
+      name: 'Health endpoint',
+      path: '/api/v1/health',
+      method: 'GET',
+      expectedStatus: 200
+    },
+    {
+      name: 'Users endpoint (should require auth)',
+      path: '/api/v1/users',
+      method: 'GET',
+      expectedStatus: 401
+    },
+    {
+      name: 'Auth register endpoint',
+      path: '/api/v1/auth/register',
+      method: 'POST',
+      data: {
+        name: 'Test User',
+        email: 'test@example.com',
+        password: 'testpass123'
+      },
+      expectedStatus: [201, 400] // 201 for success, 400 for validation errors
+    },
+    {
+      name: 'Non-existent endpoint (404 test)',
+      path: '/api/v1/nonexistent',
+      method: 'GET',
+      expectedStatus: 404
+    }
+  ];
+
+  const results = [];
+
+  for (const test of tests) {
+    try {
+      console.log(`🔍 Testing: ${test.name}`);
+      console.log(`   ${test.method} ${test.path}`);
+      
+      const result = await testEndpoint(test.path, test.method, test.data);
+      
+      const isExpectedStatus = Array.isArray(test.expectedStatus) 
+        ? test.expectedStatus.includes(result.status)
+        : result.status === test.expectedStatus;
+      
+      const status = isExpectedStatus ? '✅' : '❌';
+      
+      console.log(`   ${status} Status: ${result.status} ${isExpectedStatus ? '(Expected)' : '(Unexpected)'}`);
+      console.log(`   Response:`, JSON.stringify(result.data, null, 4));
+      console.log('');
+      
+      results.push({
+        test: test.name,
+        status: result.status,
+        success: isExpectedStatus,
+        response: result.data
+      });
+      
+    } catch (error) {
+      console.log(`   ❌ Error: ${error.message}`);
+      console.log('');
+      results.push({
+        test: test.name,
+        status: 'ERROR',
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  // Summary
+  console.log('📊 Test Results Summary:');
+  console.log('========================');
+  
+  const successful = results.filter(r => r.success).length;
+  const total = results.length;
+  
+  results.forEach(result => {
+    const icon = result.success ? '✅' : '❌';
+    console.log(`${icon} ${result.test}: ${result.status}`);
+  });
+  
+  console.log(`\n🎯 Success Rate: ${successful}/${total} (${Math.round(successful/total*100)}%)`);
+  
+  return results;
+}
+
+// Main function
+async function main() {
+  try {
+    console.log('🚀 Starting Express TypeScript Template API Test Suite\n');
+
+    // Start the server
+    console.log('📡 Starting server...');
+    serverProcess = spawn('node', ['dist/server.js'], {
+      cwd: process.cwd(),
+      stdio: 'pipe'
+    });
+
+    // Log server output
+    serverProcess.stdout.on('data', (data) => {
+      const output = data.toString().trim();
+      if (output) {
+        console.log('SERVER:', output);
+      }
+    });
+
+    serverProcess.stderr.on('data', (data) => {
+      const output = data.toString().trim();
+      if (output && !output.includes('Ignoring invalid configuration')) {
+        console.log('SERVER ERROR:', output);
+      }
+    });
+
+    // Wait for server to be ready
+    await waitForServer();
+
+    // Run the tests
+    const results = await runAPITests();
+
+    // Stop the server
+    console.log('\n🛑 Stopping server...');
+    serverProcess.kill('SIGTERM');
+    
+    console.log('\n🎉 All tests completed successfully!');
+    
+    process.exit(0);
+
+  } catch (error) {
+    console.error('\n❌ Test suite failed:', error.message);
+    
+    if (serverProcess) {
+      serverProcess.kill('SIGTERM');
+    }
+    
+    process.exit(1);
+  }
+}
+
+// Handle script termination
+process.on('SIGINT', () => {
+  console.log('\n🛑 Test suite interrupted');
+  if (serverProcess) {
+    serverProcess.kill('SIGTERM');
+  }
+  process.exit(0);
+});
+
+// Run the main function
+main();
